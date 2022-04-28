@@ -2,8 +2,10 @@
   "A Ring adapter that uses the Jetty 11+ embedded web server.
 
   Adapters are used to convert Ring handlers into running web servers."
-  (:require [ring.util.servlet :as servlet])
-  (:import [org.eclipse.jetty.server
+  (:require [clojure.string :as string]
+            [ring.core.protocols :as protocols])
+  (:import [java.util Locale]
+           [org.eclipse.jetty.server
             Request
             Server
             ServerConnector
@@ -19,13 +21,97 @@
            [jakarta.servlet AsyncContext DispatcherType AsyncEvent AsyncListener]
            [jakarta.servlet.http HttpServletRequest HttpServletResponse]))
 
+(defn- get-headers
+  "Creates a name/value map of all the request headers."
+  [^HttpServletRequest request]
+  (reduce
+    (fn [headers, ^String name]
+      (assoc headers
+        (.toLowerCase name Locale/ENGLISH)
+        (->> (.getHeaders request name)
+             (enumeration-seq)
+             (string/join ","))))
+    {}
+    (enumeration-seq (.getHeaderNames request))))
+
+(defn- get-content-length
+  "Returns the content length, or nil if there is no content."
+  [^HttpServletRequest request]
+  (let [length (.getContentLength request)]
+    (if (>= length 0) length)))
+
+(defn- get-client-cert
+  "Returns the SSL client certificate of the request, if one exists."
+  [^HttpServletRequest request]
+  (first (.getAttribute request "javax.servlet.request.X509Certificate")))
+
+(defn build-request-map
+  "Create the request map from the HttpServletRequest object."
+  [^HttpServletRequest request]
+  {:server-port        (.getServerPort request)
+   :server-name        (.getServerName request)
+   :remote-addr        (.getRemoteAddr request)
+   :uri                (.getRequestURI request)
+   :query-string       (.getQueryString request)
+   :scheme             (keyword (.getScheme request))
+   :request-method     (keyword (.toLowerCase (.getMethod request) Locale/ENGLISH))
+   :protocol           (.getProtocol request)
+   :headers            (get-headers request)
+   :content-type       (.getContentType request)
+   :content-length     (get-content-length request)
+   :character-encoding (.getCharacterEncoding request)
+   :ssl-client-cert    (get-client-cert request)
+   :body               (.getInputStream request)})
+
+(defn- set-headers
+  "Update a HttpServletResponse with a map of headers."
+  [^HttpServletResponse response, headers]
+  (doseq [[key val-or-vals] headers]
+    (if (string? val-or-vals)
+      (.setHeader response key val-or-vals)
+      (doseq [val val-or-vals]
+        (.addHeader response key val))))
+  ; Some headers must be set through specific methods
+  (when-let [content-type (get headers "Content-Type")]
+    (.setContentType response content-type)))
+
+(defn- make-output-stream
+  [^HttpServletResponse response ^AsyncContext context]
+  (let [os (.getOutputStream response)]
+    (if (nil? context)
+      os
+      (proxy [java.io.FilterOutputStream] [os]
+        (write
+          ([b]         (.write os b))
+          ([b off len] (.write os b off len)))
+        (close []
+          (.close os)
+          (.complete context))))))
+
+(defn update-servlet-response
+  "Update the HttpServletResponse using a response map. Takes an optional
+  AsyncContext."
+  ([response response-map]
+   (update-servlet-response response nil response-map))
+  ([^HttpServletResponse response context response-map]
+   (let [{:keys [status headers body]} response-map]
+     (when (nil? response)
+       (throw (NullPointerException. "HttpServletResponse is nil")))
+     (when (nil? response-map)
+       (throw (NullPointerException. "Response map is nil")))
+     (when status
+       (.setStatus response status))
+     (set-headers response headers)
+     (let [output-stream (make-output-stream response context)]
+       (protocols/write-body-to-stream body response-map output-stream)))))
+
 (defn- ^AbstractHandler proxy-handler [handler]
   (proxy [AbstractHandler] []
     (handle [_ ^Request base-request ^HttpServletRequest request response]
       (when-not (= (.getDispatcherType request) DispatcherType/ERROR)
-        (let [request-map  (servlet/build-request-map request)
+        (let [request-map  (build-request-map request)
               response-map (handler request-map)]
-          (servlet/update-servlet-response response response-map)
+          (update-servlet-response response response-map)
           (.setHandled base-request true))))))
 
 (defn- async-jetty-raise [^AsyncContext context ^HttpServletResponse response]
@@ -35,12 +121,12 @@
 
 (defn- async-jetty-respond [context response]
   (fn [response-map]
-    (servlet/update-servlet-response response context response-map)))
+    (update-servlet-response response context response-map)))
 
 (defn- async-timeout-listener [request context response handler]
   (proxy [AsyncListener] []
     (onTimeout [^AsyncEvent _]
-      (handler (servlet/build-request-map request)
+      (handler (build-request-map request)
         (async-jetty-respond context response)
         (async-jetty-raise context response)))
     (onComplete [^AsyncEvent _])
@@ -57,7 +143,7 @@
             context
             (async-timeout-listener request context response timeout-handler)))
         (handler
-          (servlet/build-request-map request)
+          (build-request-map request)
           (async-jetty-respond context response)
           (async-jetty-raise context response))
         (.setHandled base-request true)))))
