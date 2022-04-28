@@ -7,10 +7,11 @@ import java.net.URLClassLoader;
 import org.apache.tomcat.util.scan.StandardJarScanner;
 import org.eclipse.jetty.apache.jsp.JettyJasperInitializer;
 import org.eclipse.jetty.jsp.JettyJspServlet;
+import org.eclipse.jetty.server.Handler;
 import org.eclipse.jetty.server.Server;
-import org.eclipse.jetty.server.ServerConnector;
-import org.eclipse.jetty.servlet.DefaultServlet;
+import org.eclipse.jetty.server.handler.HandlerList;
 import org.eclipse.jetty.servlet.ServletContextHandler;
+import org.eclipse.jetty.servlet.ServletHandler;
 import org.eclipse.jetty.servlet.ServletHolder;
 import org.eclipse.jetty.util.component.AbstractLifeCycle;
 
@@ -48,13 +49,7 @@ public class WebApp {
         }
     }
 
-    public static void main(String[] args) throws Exception {
-
-        Server server = new Server();
-
-        ServerConnector connector = new ServerConnector(server);
-        connector.setPort(8080);
-        server.addConnector(connector);
+    public static void config(Server server) throws Exception {
 
         URL webappUrl = server.getClass().getResource(WEBAPP);
         if (webappUrl == null) {
@@ -88,16 +83,18 @@ public class WebApp {
         // register Servlets
         servletContextHandler.addServlet(DashboardServlet.class, Path.DASHBOARD);
 
-        // Default Servlet (always last, always named "default")
-        ServletHolder holderDefault = new ServletHolder("default", DefaultServlet.class);
-        holderDefault.setInitParameter("resourceBase", resourceBase);
-        holderDefault.setInitParameter("dirAllowed", "false");
-        servletContextHandler.addServlet(holderDefault, "/");
-        server.setHandler(servletContextHandler);
+        // make sure there's no DefaultServlet, so unhandled requests get to the ring handler
+        servletContextHandler.getServletHandler().setEnsureDefaultServlet(false);
+        Handler handler = servletContextHandler.getSessionHandler().getHandler();
+        if (handler instanceof ServletHandler servletHandler) {
+            servletHandler.setEnsureDefaultServlet(false);
+        }
 
-        server.start();
+        // save ring handler the server comes with
+        var ringHandler = server.getHandler();
 
-        // server will keep running until it receives an Interrupt Signal, or SIGINT (`kill -TERM {pid}` or Ctrl+C)
-        server.join();
+        // set a new composite handler
+        // note: ringHandler must come after, since ring sets request#handled to true most of the time
+        server.setHandler(new HandlerList(servletContextHandler, ringHandler));
     }
 }

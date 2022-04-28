@@ -34,6 +34,17 @@
         </dependency>
 
         <dependency>
+            <groupId>metosin</groupId>
+            <artifactId>reitit-core</artifactId>
+            <version>0.5.18</version>
+        </dependency>
+        <dependency>
+            <groupId>metosin</groupId>
+            <artifactId>reitit-ring</artifactId>
+            <version>0.5.18</version>
+        </dependency>
+
+        <dependency>
             <groupId>org.eclipse.jetty</groupId>
             <artifactId>jetty-webapp</artifactId>
             <version>${jetty.version}</version>
