@@ -11,13 +11,10 @@
             ServerConnector
             ConnectionFactory
             HttpConfiguration
-            HttpConnectionFactory
-            SslConnectionFactory
-            SecureRequestCustomizer]
+            HttpConnectionFactory]
            [org.eclipse.jetty.server.handler AbstractHandler]
            [org.eclipse.jetty.util BlockingArrayQueue]
            [org.eclipse.jetty.util.thread ThreadPool QueuedThreadPool]
-           [org.eclipse.jetty.util.ssl SslContextFactory$Server KeyStoreScanner]
            [jakarta.servlet DispatcherType]
            [jakarta.servlet.http HttpServletRequest HttpServletResponse]))
 
@@ -116,56 +113,6 @@
       (.setHost (options :host))
       (.setIdleTimeout (options :max-idle-time 200000)))))
 
-(defn- ^SslContextFactory$Server ssl-context-factory [options]
-  (let [context-server (SslContextFactory$Server.)]
-    (if (string? (options :keystore))
-      (.setKeyStorePath context-server (options :keystore))
-      (.setKeyStore context-server ^java.security.KeyStore (options :keystore)))
-    (when (string? (options :keystore-type))
-      (.setKeyStoreType context-server (options :keystore-type)))
-    (.setKeyStorePassword context-server (options :key-password))
-    (cond
-      (string? (options :truststore))
-      (.setTrustStorePath context-server (options :truststore))
-      (instance? java.security.KeyStore (options :truststore))
-      (.setTrustStore context-server ^java.security.KeyStore (options :truststore)))
-    (when (options :trust-password)
-      (.setTrustStorePassword context-server (options :trust-password)))
-    (when (options :ssl-context)
-      (.setSslContext context-server (options :ssl-context)))
-    (case (options :client-auth)
-      :need (.setNeedClientAuth context-server true)
-      :want (.setWantClientAuth context-server true)
-      nil)
-    (when-let [exclude-ciphers (options :exclude-ciphers)]
-      (let [ciphers (into-array String exclude-ciphers)]
-        (if (options :replace-exclude-ciphers?)
-          (.setExcludeCipherSuites context-server ciphers)
-          (.addExcludeCipherSuites context-server ciphers))))
-    (when-let [exclude-protocols (options :exclude-protocols)]
-      (let [protocols (into-array String exclude-protocols)]
-        (if (options :replace-exclude-protocols?)
-          (.setExcludeProtocols context-server protocols)
-          (.addExcludeProtocols context-server protocols))))
-    context-server))
-
-(defn- ^ServerConnector ssl-connector [^Server server options]
-  (let [ssl-port     (options :ssl-port 443)
-        http-factory (HttpConnectionFactory.
-                       (doto (http-config options)
-                         (.setSecureScheme "https")
-                         (.setSecurePort ssl-port)
-                         (.addCustomizer (SecureRequestCustomizer.))))
-        ssl-context  (ssl-context-factory options)
-        ssl-factory  (SslConnectionFactory. ssl-context "http/1.1")]
-    (when-let [scan-interval (options :keystore-scan-interval)]
-      (.addBean server (doto (KeyStoreScanner. ssl-context)
-                         (.setScanInterval scan-interval))))
-    (doto (server-connector server ssl-factory http-factory)
-      (.setPort ssl-port)
-      (.setHost (options :host))
-      (.setIdleTimeout (options :max-idle-time 200000)))))
-
 (defn- ^ThreadPool create-threadpool [options]
   (let [min-threads         (options :min-threads 8)
         max-threads         (options :max-threads 50)
@@ -186,10 +133,7 @@
 (defn- ^Server create-server [options]
   (let [pool   (or (:thread-pool options) (create-threadpool options))
         server (Server. pool)]
-    (when (:http? options true)
-      (.addConnector server (http-connector server options)))
-    (when (or (options :ssl?) (options :ssl-port))
-      (.addConnector server (ssl-connector server options)))
+    (.addConnector server (http-connector server options))
     server))
 
 (defn ^Server run-jetty
@@ -202,29 +146,7 @@
   :join?                  - blocks the thread until server ends
                             (defaults to true)
   :daemon?                - use daemon threads (defaults to false)
-  :http?                  - listen on :port for HTTP traffic (defaults to true)
-  :ssl?                   - allow connections over HTTPS
-  :ssl-port               - the SSL port to listen on (defaults to 443, implies
-                            :ssl? is true)
-  :ssl-context            - an optional SSLContext to use for SSL connections
-  :exclude-ciphers        - when :ssl? is true, additionally exclude these
-                            cipher suites
-  :exclude-protocols      - when :ssl? is true, additionally exclude these
-                            protocols
-  :replace-exclude-ciphers?   - when true, :exclude-ciphers will replace rather
-                                than add to the cipher exclusion list (defaults
-                                to false)
-  :replace-exclude-protocols? - when true, :exclude-protocols will replace
-                                rather than add to the protocols exclusion list
-                                (defaults to false)
-  :keystore               - the keystore to use for SSL connections
-  :keystore-type          - the keystore type (default jks)
-  :key-password           - the password to the keystore
-  :keystore-scan-interval - if not nil, the interval in seconds to scan for an
-                            updated keystore
   :thread-pool            - custom thread pool instance for Jetty to use
-  :truststore             - a truststore to use for SSL connections
-  :trust-password         - the password to the truststore
   :max-threads            - the maximum number of threads to use (default 50)
   :min-threads            - the minimum number of threads to use (default 8)
   :max-queued-requests    - the maximum number of requests to be queued
@@ -233,8 +155,6 @@
                             (default 60000)
   :max-idle-time          - the maximum idle time in milliseconds for a
                             connection (default 200000)
-  :client-auth            - SSL client certificate authenticate, may be set to
-                            :need,:want or :none (defaults to :none)
   :send-date-header?      - add a date header to the response (default true)
   :output-buffer-size     - the response body buffer size (default 32768)
   :request-header-size    - the maximum size of a request header (default 8192)
