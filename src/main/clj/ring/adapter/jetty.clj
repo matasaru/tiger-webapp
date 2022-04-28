@@ -18,7 +18,7 @@
            [org.eclipse.jetty.util BlockingArrayQueue]
            [org.eclipse.jetty.util.thread ThreadPool QueuedThreadPool]
            [org.eclipse.jetty.util.ssl SslContextFactory$Server KeyStoreScanner]
-           [jakarta.servlet AsyncContext DispatcherType AsyncEvent AsyncListener]
+           [jakarta.servlet DispatcherType]
            [jakarta.servlet.http HttpServletRequest HttpServletResponse]))
 
 (defn- get-headers
@@ -75,25 +75,9 @@
   (when-let [content-type (get headers "Content-Type")]
     (.setContentType response content-type)))
 
-(defn- make-output-stream
-  [^HttpServletResponse response ^AsyncContext context]
-  (let [os (.getOutputStream response)]
-    (if (nil? context)
-      os
-      (proxy [java.io.FilterOutputStream] [os]
-        (write
-          ([b]         (.write os b))
-          ([b off len] (.write os b off len)))
-        (close []
-          (.close os)
-          (.complete context))))))
-
 (defn update-servlet-response
-  "Update the HttpServletResponse using a response map. Takes an optional
-  AsyncContext."
-  ([response response-map]
-   (update-servlet-response response nil response-map))
-  ([^HttpServletResponse response context response-map]
+  "Update the HttpServletResponse using a response map."
+  ([^HttpServletResponse response response-map]
    (let [{:keys [status headers body]} response-map]
      (when (nil? response)
        (throw (NullPointerException. "HttpServletResponse is nil")))
@@ -102,7 +86,7 @@
      (when status
        (.setStatus response status))
      (set-headers response headers)
-     (let [output-stream (make-output-stream response context)]
+     (let [output-stream (.getOutputStream response)]
        (protocols/write-body-to-stream body response-map output-stream)))))
 
 (defn- ^AbstractHandler proxy-handler [handler]
@@ -113,40 +97,6 @@
               response-map (handler request-map)]
           (update-servlet-response response response-map)
           (.setHandled base-request true))))))
-
-(defn- async-jetty-raise [^AsyncContext context ^HttpServletResponse response]
-  (fn [^Throwable exception]
-    (.sendError response 500 (.getMessage exception))
-    (.complete context)))
-
-(defn- async-jetty-respond [context response]
-  (fn [response-map]
-    (update-servlet-response response context response-map)))
-
-(defn- async-timeout-listener [request context response handler]
-  (proxy [AsyncListener] []
-    (onTimeout [^AsyncEvent _]
-      (handler (build-request-map request)
-        (async-jetty-respond context response)
-        (async-jetty-raise context response)))
-    (onComplete [^AsyncEvent _])
-    (onError [^AsyncEvent _])
-    (onStartAsync [^AsyncEvent _])))
-
-(defn- ^AbstractHandler async-proxy-handler [handler timeout timeout-handler]
-  (proxy [AbstractHandler] []
-    (handle [_ ^Request base-request ^HttpServletRequest request ^HttpServletResponse response]
-      (let [^AsyncContext context (.startAsync request)]
-        (.setTimeout context timeout)
-        (when timeout-handler
-          (.addListener
-            context
-            (async-timeout-listener request context response timeout-handler)))
-        (handler
-          (build-request-map request)
-          (async-jetty-respond context response)
-          (async-jetty-raise context response))
-        (.setHandled base-request true)))))
 
 (defn- ^ServerConnector server-connector [^Server server & factories]
   (ServerConnector. server #^"[Lorg.eclipse.jetty.server.ConnectionFactory;" (into-array ConnectionFactory factories)))
@@ -247,10 +197,6 @@
   supplied options:
 
   :configurator           - a function called with the Jetty Server instance
-  :async?                 - if true, treat the handler as asynchronous
-  :async-timeout          - async context timeout in ms
-                            (defaults to 0, no timeout)
-  :async-timeout-handler  - an async handler to handle an async context timeout
   :port                   - the port to listen on (defaults to 80)
   :host                   - the hostname to listen on
   :join?                  - blocks the thread until server ends
@@ -296,12 +242,7 @@
   :send-server-version?   - add Server header to HTTP response (default true)"
   [handler options]
   (let [server (create-server (dissoc options :configurator))]
-    (if (:async? options)
-      (.setHandler server
-        (async-proxy-handler handler
-          (:async-timeout options 0)
-          (:async-timeout-handler options)))
-      (.setHandler server (proxy-handler handler)))
+    (.setHandler server (proxy-handler handler))
     (when-let [configurator (:configurator options)]
       (configurator server))
     (try
