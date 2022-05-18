@@ -22,7 +22,7 @@ import tiger.servlet.Path;
 /**
  * Started with code from <a href="https://github.com/jetty-project/embedded-jetty-jsp">embedded-jetty-jsp example</a>
  */
-public class WebApp {
+public class JettyConfigurator {
 
     private static final String WEBAPP = "/webapp/";
 
